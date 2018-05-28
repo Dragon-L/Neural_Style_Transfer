@@ -79,26 +79,36 @@ def compute_content_cost(content_image_activations, generate_image_activations):
 
 
 def compute_style_layer_cost(style_image_activations, generate_image_activations):
-    pass
+    m, n_h, n_w, n_c = style_image_activations.shape
+    s_matrix = tf.reshape(style_image_activations, (-1, n_c))
+    g_matrix = tf.reshape(generate_image_activations, (-1, n_c))
+    s_mul = tf.matmul(tf.transpose(s_matrix), s_matrix)
+    g_mul = tf.matmul(tf.transpose(g_matrix), g_matrix)
+    style_cost = tf.divide(tf.reduce_sum(tf.square(tf.subtract(s_mul, g_mul))), tf.square(2.0 * n_h * n_w * n_c))
+    return style_cost
 
 
 def main():
+    first_time = False
     images = []
-    content_img = imread('./images/Coffee-Mug.jpg')
+    content_img = imread('./images/dou.jpg')
     style_img = imread('./images/style_image.jpg')
     content_img = imresize(content_img, (CONFIG.IMAGE_HEIGHT, CONFIG.IMAGE_WIDTH))
     style_img = imresize(style_img, (CONFIG.IMAGE_HEIGHT, CONFIG.IMAGE_WIDTH))
     content_img = reshape_and_normalize_image(content_img)
     style_img = reshape_and_normalize_image(style_img)
-    generate_img = generate_noise_image(content_img)
+
+    if first_time:
+        generate_img = generate_noise_image(content_img)
+    else:
+        generate_img = imread('./images/generate_image.jpg')
+        generate_img = np.expand_dims(generate_img, axis=0)
 
     # images.append(np.squeeze(generate_img))
 
     input_img = tf.get_variable(name='input_img', dtype=tf.float32, shape=(1, CONFIG.IMAGE_HEIGHT, CONFIG.IMAGE_WIDTH, CONFIG.COLOR_CHANNELS))
     vgg19 = ks.applications.vgg19.VGG19(weights='imagenet', input_tensor=tf.convert_to_tensor(input_img))
     weight = vgg19.get_weights()
-
-    print(vgg19.summary())
 
     content_output = vgg19.get_layer(CONFIG.CONTENT_LAYER).output
     with tf.Session() as sess:
@@ -108,29 +118,35 @@ def main():
         content_activations = sess.run(content_output)
     content_cost = compute_content_cost(content_activations, content_output)
 
-    for (layer, weight) in CONFIG.STYLE_LAYERS:
-        style_output = vgg19.get_layer(layer).output
-        with tf.Session() as sess:
-            sess.run(tf.global_variables_initializer())
-            vgg19.set_weights(weights=weight)
-            sess.run(tf.assign(input_img, style_img))
+    style_cost = 0
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+        vgg19.set_weights(weights=weight)
+        sess.run(tf.assign(input_img, style_img))
+        for (layer, coeff) in CONFIG.STYLE_LAYERS:
+            style_output = vgg19.get_layer(layer).output
             style_activations = sess.run(style_output)
-            style_cost = compute_style_layer_cost(style_activations, style_output)
+            layer_style_cost = compute_style_layer_cost(style_activations, style_output)
+            style_cost += coeff * layer_style_cost
 
+    total_cost = 10 * content_cost + 40 * style_cost
+    train_step = tf.train.AdamOptimizer().minimize(total_cost, var_list=input_img)
 
-    train_step = tf.train.AdamOptimizer(2.0).minimize(content_cost, var_list=input_img )
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+        vgg19.set_weights(weights=weight)
+        sess.run(tf.assign(input_img, generate_img))
+        for iteration_num in range(2000):
+            cost, _ = sess.run([content_cost, train_step])
+            print('iteration ' + str(iteration_num) + ' : ' + str(cost))
+            # if iteration_num % 50 == 0:
+                # output_image = sess.run(input_img)
+                # temp = np.squeeze(output_image)
+                # imsave('./images/generate_image_' + str(iteration_num) + '.jpg', temp)
+        output_image = sess.run(input_img)
 
-    # with tf.Session() as sess:
-    #     sess.run(tf.global_variables_initializer())
-    #     vgg19.set_weights(weights=weight)
-    #     sess.run(tf.assign(input_img, generate_img))
-    #     for iteration_num in range(10):
-    #         cost, _ = sess.run([content_cost, train_step])
-    #         print(cost)
-    #     output_image = sess.run(input_img)
-
-    # output_image = np.squeeze(output_image)
-    # imsave('./images/generate_image.jpg', output_image)
+    output_image = np.squeeze(output_image)
+    imsave('./images/generate_image.jpg', output_image)
     # images.append(output_image)
     # show_images(images)
     # plt.imshow(output_image)
