@@ -1,15 +1,20 @@
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.keras as ks
-from scipy.misc import imread, imresize, imsave
+from scipy.misc import imread, imresize, imsave, imshow
 import matplotlib.pyplot as plt
+
+from utility import show_images, reshape_and_normalize_image, generate_noise_image
 
 
 class CONFIG:
+    CONTENT_IMAGE_PATH = './images/house.jpg'
+    STYLE_IMAGE_PATH = './images/style_image.jpg'
+    GENERATED_IMAGE_PATH = './images/generate_image.jpg'
     IMAGE_WIDTH = 224
     IMAGE_HEIGHT = 224
     COLOR_CHANNELS = 3
-    NOISE_RATIO = 0.6
+    NOISE_RATIO = 0.0
     CONTENT_LAYER = 'block4_conv2'
     STYLE_LAYERS = [
         ('block1_conv1', 0.2),
@@ -21,61 +26,73 @@ class CONFIG:
     MEANS = np.array([123.68, 116.779, 103.939]).reshape((1,1,1,3))
 
 
-def show_images(images, cols=1, titles=None):
-    """Display a list of images in a single figure with matplotlib.
+def main():
+    first_time = True
 
-    Parameters
-    ---------
-    images: List of np.arrays compatible with plt.imshow.
+    content_img = imread(CONFIG.CONTENT_IMAGE_PATH)
+    style_img = imread(CONFIG.STYLE_IMAGE_PATH)
+    content_img = reshape_and_normalize_image(content_img, CONFIG.MEANS, (CONFIG.IMAGE_HEIGHT, CONFIG.IMAGE_WIDTH))
+    style_img = reshape_and_normalize_image(style_img, CONFIG.MEANS, (CONFIG.IMAGE_HEIGHT, CONFIG.IMAGE_WIDTH))
 
-    cols (Default = 1): Number of columns in figure (number of rows is
-                        set to np.ceil(n_images/float(cols))).
+    if first_time:
+        generate_img = generate_noise_image(content_img, CONFIG.IMAGE_HEIGHT, CONFIG.IMAGE_WIDTH, CONFIG.COLOR_CHANNELS, CONFIG.NOISE_RATIO)
+    else:
+        generate_img = imread(CONFIG.GENERATED_IMAGE_PATH)
+        generate_img = np.expand_dims(generate_img, axis=0)
 
-    titles: List of titles corresponding to each image. Must have
-            the same length as titles.
-    """
-    assert ((titles is None) or (len(images) == len(titles)))
-    n_images = len(images)
-    if titles is None:
-        titles = ['Image (%d)' % i for i in range(1, n_images + 1)]
-    fig = plt.figure()
-    for n, (image, title) in enumerate(zip(images, titles)):
-        a = fig.add_subplot(cols, np.ceil(n_images / float(cols)), n + 1)
-        if image.ndim == 2:
-            plt.gray()
-        plt.imshow(image)
-        a.set_title(title)
-    fig.set_size_inches(np.array(fig.get_size_inches()) * n_images)
-    plt.show()
+    save_image(generate_img, 'generate_img_0')
+    input_img = tf.get_variable(name='input_img', dtype=tf.float32, shape=(1, CONFIG.IMAGE_HEIGHT, CONFIG.IMAGE_WIDTH, CONFIG.COLOR_CHANNELS))
+    vgg19 = ks.applications.vgg19.VGG19(weights='imagenet', input_tensor=tf.convert_to_tensor(input_img))
+    weight = vgg19.get_weights()
 
+    content_cost = compute_content_cost(content_img, input_img, vgg19, weight, CONFIG.CONTENT_LAYER)
+    style_cost = compute_style_cost(input_img, style_img, vgg19, weight, CONFIG.STYLE_LAYERS)
+    total_cost = 10 * content_cost + 40 * style_cost
 
-def reshape_and_normalize_image(image):
-    image = np.reshape(image, ((1,) + image.shape))
-    # image = np.expand_dims(image)
+    train_step = tf.train.AdamOptimizer(20.0).minimize(total_cost, var_list=input_img)
 
-    image = image - CONFIG.MEANS
+    summary = tf.summary.scalar('total_cost', total_cost)
+    writer = tf.summary.FileWriter('./tensorboard/train', tf.get_default_graph())
 
-    return image
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+        vgg19.set_weights(weights=weight)
+        sess.run(tf.assign(input_img, generate_img))
+        for iteration_num in range(100):
+            summary_cost ,cost, _ = sess.run([summary, total_cost, train_step])
+            print('iteration ' + str(iteration_num) + ' : ' + str(cost))
+            writer.add_summary(summary_cost, iteration_num)
+            if iteration_num % 10 == 0:
+                output_image = sess.run(input_img)
+                save_image(output_image, 'generated_image_' + str(iteration_num))
+        output_image = sess.run(input_img)
 
-
-def generate_noise_image(content_image, noise_ratio=CONFIG.NOISE_RATIO):
-    """
-    Generates a noisy image by adding random noise to the content_image
-    """
-
-    # Generate a random noise_image
-    noise_image = np.random.uniform(-20, 20,
-                                    (1, CONFIG.IMAGE_HEIGHT, CONFIG.IMAGE_WIDTH, CONFIG.COLOR_CHANNELS)).astype(
-        'float32')
-
-    # Set the input_image to be a weighted average of the content_image and a noise_image
-    input_image = noise_image * noise_ratio + content_image * (1 - noise_ratio)
-
-    return input_image
+    writer.close()
+    save_image(output_image, 'generate_image')
+    # plt.imshow(np.squeeze(output_image))
+    # plt.show()
+    print('it is done')
 
 
-def compute_content_cost(content_image_activations, generate_image_activations):
-    return tf.divide(tf.reduce_mean(tf.square(tf.subtract(content_image_activations, generate_image_activations))), 4.0)
+def save_image(output_image, image_name):
+    # output_image = output_image + CONFIG.MEANS
+    output_image = np.squeeze(output_image)
+    output_image = np.clip(output_image, 0, 255).astype('uint8')
+    imsave('./images/' + image_name + '.jpg', output_image)
+
+
+def compute_style_cost(generated_img, style_img, model, pretrained_weight, output_layers):
+    style_cost = 0
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+        model.set_weights(weights=pretrained_weight)
+        sess.run(tf.assign(generated_img, style_img))
+        for (layer, coeff) in output_layers:
+            style_output = model.get_layer(layer).output
+            style_activations = sess.run(style_output)
+            layer_style_cost = compute_style_layer_cost(style_activations, style_output)
+            style_cost += coeff * layer_style_cost
+    return style_cost
 
 
 def compute_style_layer_cost(style_image_activations, generate_image_activations):
@@ -88,70 +105,20 @@ def compute_style_layer_cost(style_image_activations, generate_image_activations
     return style_cost
 
 
-def main():
-    first_time = False
-    images = []
-    content_img = imread('./images/dou.jpg')
-    style_img = imread('./images/style_image.jpg')
-    content_img = imresize(content_img, (CONFIG.IMAGE_HEIGHT, CONFIG.IMAGE_WIDTH))
-    style_img = imresize(style_img, (CONFIG.IMAGE_HEIGHT, CONFIG.IMAGE_WIDTH))
-    content_img = reshape_and_normalize_image(content_img)
-    style_img = reshape_and_normalize_image(style_img)
-
-    if first_time:
-        generate_img = generate_noise_image(content_img)
-    else:
-        generate_img = imread('./images/generate_image.jpg')
-        generate_img = np.expand_dims(generate_img, axis=0)
-
-    # images.append(np.squeeze(generate_img))
-
-    input_img = tf.get_variable(name='input_img', dtype=tf.float32, shape=(1, CONFIG.IMAGE_HEIGHT, CONFIG.IMAGE_WIDTH, CONFIG.COLOR_CHANNELS))
-    vgg19 = ks.applications.vgg19.VGG19(weights='imagenet', input_tensor=tf.convert_to_tensor(input_img))
-    weight = vgg19.get_weights()
-
-    content_output = vgg19.get_layer(CONFIG.CONTENT_LAYER).output
+def compute_content_cost(content_img, generated_img, model, pretrained_weight, output_layer):
+    output = model.get_layer(output_layer).output
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
-        vgg19.set_weights(weights=weight)
-        sess.run(tf.assign(input_img, content_img))
-        content_activations = sess.run(content_output)
-    content_cost = compute_content_cost(content_activations, content_output)
-
-    style_cost = 0
-    with tf.Session() as sess:
-        sess.run(tf.global_variables_initializer())
-        vgg19.set_weights(weights=weight)
-        sess.run(tf.assign(input_img, style_img))
-        for (layer, coeff) in CONFIG.STYLE_LAYERS:
-            style_output = vgg19.get_layer(layer).output
-            style_activations = sess.run(style_output)
-            layer_style_cost = compute_style_layer_cost(style_activations, style_output)
-            style_cost += coeff * layer_style_cost
-
-    total_cost = 10 * content_cost + 40 * style_cost
-    train_step = tf.train.AdamOptimizer().minimize(total_cost, var_list=input_img)
-
-    with tf.Session() as sess:
-        sess.run(tf.global_variables_initializer())
-        vgg19.set_weights(weights=weight)
-        sess.run(tf.assign(input_img, generate_img))
-        for iteration_num in range(2000):
-            cost, _ = sess.run([content_cost, train_step])
-            print('iteration ' + str(iteration_num) + ' : ' + str(cost))
-            # if iteration_num % 50 == 0:
-                # output_image = sess.run(input_img)
-                # temp = np.squeeze(output_image)
-                # imsave('./images/generate_image_' + str(iteration_num) + '.jpg', temp)
-        output_image = sess.run(input_img)
-
-    output_image = np.squeeze(output_image)
-    imsave('./images/generate_image.jpg', output_image)
-    # images.append(output_image)
-    # show_images(images)
-    # plt.imshow(output_image)
-    # plt.show()
-    print('it is done')
+        model.set_weights(weights=pretrained_weight)
+        sess.run(tf.assign(generated_img, content_img))
+        content_activations = sess.run(output)
+    content_cost = tf.divide(tf.reduce_mean(tf.square(tf.subtract(content_activations, output))), 4.0)
+    return content_cost
 
 
 main()
+
+
+
+
+
