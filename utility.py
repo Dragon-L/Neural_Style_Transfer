@@ -3,22 +3,6 @@ import matplotlib as plt
 from scipy.misc import imresize
 
 
-class CONFIG:
-    IMAGE_WIDTH = 224
-    IMAGE_HEIGHT = 224
-    COLOR_CHANNELS = 3
-    NOISE_RATIO = 0.6
-    CONTENT_LAYER = 'block4_conv2'
-    STYLE_LAYERS = [
-        ('block1_conv1', 0.2),
-        ('block2_conv1', 0.2),
-        ('block3_conv1', 0.2),
-        ('block4_conv1', 0.2),
-        ('block5_conv1', 0.2)]
-    INPUT_LAYER = 'input_1'
-    MEANS = np.array([123.68, 116.779, 103.939]).reshape((1,1,1,3))
-
-
 def show_images(images, cols=1, titles=None):
     """Display a list of images in a single figure with matplotlib.
 
